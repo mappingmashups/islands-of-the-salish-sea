@@ -248,7 +248,7 @@ Salish_Sea_Bioregion_Land_*/
 
 # DEM cache and composite (large generated files)
 .dem_cache/
-composite_dem.tif
+composite_dem*.tif
 
 # Blender auto-save backups
 *.blend1
