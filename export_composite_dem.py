@@ -27,6 +27,7 @@ from scipy.ndimage import map_coordinates
 from draw_islands import (
     split_rendezvous, normalize_geom, compute_layout,
     optimize_row1_nudge, compact_placed, center_rows,
+    justify_rows, expand_to_margins,
     autoscale, place_geom, bbox_wh,
 )
 import dem_hillshade as _dem
@@ -219,6 +220,11 @@ def main():
     ap.add_argument("--bc-regional-districts",
                     default="ABMS_REGIONAL_DISTRICTS_SP/ABMS_RD_polygon.shp",
                     dest="bc_regional_districts")
+    ap.add_argument("--justify-from-row", type=int, default=None, dest="justify_from_row")
+    ap.add_argument("--justify-margin",   type=float, default=None, dest="justify_margin")
+    ap.add_argument("--justify-row2-margin", type=float, default=None, dest="justify_row2_margin")
+    ap.add_argument("--expand-to-margins", action="store_true", dest="expand_to_margins")
+    ap.add_argument("--snap-top", action="store_true", dest="snap_top")
     ap.add_argument("--compact-simplify", type=float, default=0.5,
                     dest="compact_simplify")
     ap.add_argument("--cell-m", type=float, default=None, dest="cell_m",
@@ -314,12 +320,55 @@ def main():
     print("Centering rows …")
     placed, final_geoms = center_rows(placed, final_geoms, args.page_width)
 
+    jfr = (args.justify_from_row - 1) if args.justify_from_row is not None else None
+    jm  = args.justify_margin
+
+    if jfr is not None:
+        placed, final_geoms = justify_rows(
+            placed, final_geoms, args.page_width, args.margin,
+            justify_from_row=jfr, justify_margin=jm,
+        )
+
+    expand_factor = 1.0
+    if args.expand_to_margins:
+        placed, final_geoms, expand_factor = expand_to_margins(
+            placed, final_geoms, args.page_width, args.page_height, args.margin,
+            justify_from_row=jfr,
+        )
+        if jfr is not None:
+            placed, final_geoms = justify_rows(
+                placed, final_geoms, args.page_width, args.margin,
+                justify_from_row=jfr, justify_margin=jm,
+            )
+
+    if args.justify_row2_margin is not None:
+        placed, final_geoms = justify_rows(
+            placed, final_geoms, args.page_width, args.margin,
+            justify_from_row=1, to_row=2,
+            justify_margin=args.justify_row2_margin,
+        )
+
+    if args.snap_top:
+        from shapely.affinity import translate
+        top_y = min(g.bounds[1] for g in final_geoms)
+        shift = top_y - args.margin
+        if abs(shift) > 0.01:
+            print(f"Snapping to top margin: shifting layout up {shift:.1f} mm …")
+            final_geoms = [translate(g, 0, -shift) for g in final_geoms]
+            for entry in placed:
+                entry["top"] -= shift
+
     # ── build composite DEM ───────────────────────────────────────────────────
+    # mm_per_m must reflect the final effective scale (after expand_to_margins),
+    # not the initial auto-scale — otherwise the UTM→poster mapping is too tight
+    # and each island gets flat "beaches" around its edges.
+    effective_mm_per_m = mm_per_m * expand_factor
+    print(f"Effective scale: 1:{1000/effective_mm_per_m:.0f}  (mm_per_m={effective_mm_per_m:.6f})")
     build_composite(
         placed, final_geoms,
         page_w=args.page_width,
         page_h=args.page_height,
-        mm_per_m=mm_per_m,
+        mm_per_m=effective_mm_per_m,
         cell_m=args.cell_m,
         zoom=args.zoom,
         output_path=args.output,

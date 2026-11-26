@@ -32,6 +32,7 @@ Key options:
 """
 
 import argparse
+import os
 import re
 import textwrap
 import numpy as np
@@ -594,13 +595,52 @@ def draw_map(placed, final_geoms, page_w, page_h, args, render_mode="all"):
             page_w - 2 * args.margin, page_h - 2 * args.margin,
             fill=False, edgecolor="#CC0000", linewidth=0.5, zorder=20, alpha=0.85,
         ))
-        # 1-inch = 25.4 mm grid
-        for _xg in np.arange(25.4, page_w, 25.4):
+        # 1 cm = 10 mm grid
+        for _xg in np.arange(10, page_w, 10):
             ax.plot([_xg, _xg], [0, page_h], color="#0044CC",
                     linewidth=0.15, alpha=0.3, zorder=19)
-        for _yg in np.arange(25.4, page_h, 25.4):
+        for _yg in np.arange(10, page_h, 10):
             ax.plot([0, page_w], [_yg, _yg], color="#0044CC",
                     linewidth=0.15, alpha=0.3, zorder=19)
+    # ── hillshade colormap lookup ─────────────────────────────────────────────
+    _hs_style = getattr(args, "hillshade_style", "gray")
+    if _hs_style == "warm":
+        from matplotlib.colors import LinearSegmentedColormap as _LSC
+        _hs_cmap = _LSC.from_list("warm_relief", [
+            (0.42, 0.47, 0.62),   # cool blue-grey shadow
+            (0.80, 0.80, 0.80),   # neutral mid
+            (1.00, 0.97, 0.90),   # warm cream highlight
+        ])
+    elif _hs_style == "sepia":
+        from matplotlib.colors import LinearSegmentedColormap as _LSC
+        _hs_cmap = _LSC.from_list("sepia_relief", [
+            (0.52, 0.45, 0.33),   # warm brown shadow
+            (0.80, 0.77, 0.68),   # warm mid
+            (1.00, 0.97, 0.90),   # warm cream highlight
+        ])
+    elif _hs_style == "atlas":
+        from matplotlib.colors import LinearSegmentedColormap as _LSC
+        _hs_cmap = _LSC.from_list("atlas_relief", [
+            (0.28, 0.36, 0.62),   # deep cool blue shadow
+            (0.76, 0.79, 0.82),   # cool-neutral mid
+            (1.00, 0.98, 0.92),   # warm white highlight
+        ])
+    else:
+        _hs_cmap = "gray"
+    _hs_gamma   = getattr(args, "hillshade_gamma",   1.0)
+    _hs_stretch = getattr(args, "hillshade_stretch", False)
+
+    def _apply_hs(hs_arr):
+        """Apply gamma, optional stretch, and return a masked array ready for imshow."""
+        m = np.ma.masked_invalid(hs_arr)
+        if _hs_stretch and m.count() > 0:
+            lo, hi = m.min(), m.max()
+            if hi > lo:
+                m = (m - lo) / (hi - lo)
+        if _hs_gamma != 1.0:
+            m = m ** _hs_gamma
+        return m
+
     do_hillshade = getattr(args, "hillshade", False)
     if do_hillshade:
         import dem_hillshade as _dem
@@ -612,15 +652,47 @@ def draw_map(placed, final_geoms, page_w, page_h, args, render_mode="all"):
         import numpy as _np_r
         _raw = _np_r.array(_PIL_Image.open(relievo_path))
         if _raw.dtype == _np_r.uint16:
-            # Blender outputs 16-bit PNG; PIL.convert("L") clips to 255 (all white).
-            # Normalise directly from the uint16 range actually present in the file.
             _hs_img = _raw.astype(float)
             _hs_img = (_hs_img - _hs_img.min()) / (_hs_img.max() - _hs_img.min())
         else:
             _hs_img = _raw.astype(float) / 255.0
-        ax.imshow(_hs_img, cmap="gray", vmin=0, vmax=1, origin="upper",
-                  extent=(0, page_w, page_h, 0),
-                  alpha=args.hillshade_alpha, interpolation="bilinear", zorder=4)
+
+        # Optional shadow/highlight clipping before gamma
+        _hs_shadow    = getattr(args, "hillshade_shadow",    0.0)
+        _hs_highlight = getattr(args, "hillshade_highlight", 1.0)
+        if _hs_shadow > 0.0 or _hs_highlight < 1.0:
+            _hs_img = np.clip((_hs_img - _hs_shadow) / (_hs_highlight - _hs_shadow), 0.0, 1.0)
+
+        _hs_img = _apply_hs(_hs_img)
+
+        _hs_blend = getattr(args, "hillshade_blend", "alpha")
+        if _hs_blend == "multiply":
+            # Shadow areas darken the page; highlights are fully transparent.
+            # RGB channels: shadow color (from colormap at 0) or plain black.
+            # Alpha = (1 - hillshade) * hillshade_alpha
+            _alpha_ch = (1.0 - _hs_img) * args.hillshade_alpha
+            if _hs_style == "warm":
+                # Cool blue-grey shadow tint
+                _r = np.full_like(_hs_img, 0.42)
+                _g = np.full_like(_hs_img, 0.47)
+                _b = np.full_like(_hs_img, 0.62)
+            elif _hs_style == "sepia":
+                _r = np.full_like(_hs_img, 0.52)
+                _g = np.full_like(_hs_img, 0.45)
+                _b = np.full_like(_hs_img, 0.33)
+            elif _hs_style == "atlas":
+                _r = np.full_like(_hs_img, 0.28)
+                _g = np.full_like(_hs_img, 0.36)
+                _b = np.full_like(_hs_img, 0.62)
+            else:
+                _r = _g = _b = np.zeros_like(_hs_img)
+            _rgba = np.stack([_r, _g, _b, _alpha_ch], axis=-1)
+            ax.imshow(_rgba, origin="upper", extent=(0, page_w, page_h, 0),
+                      interpolation="bilinear", zorder=4)
+        else:
+            ax.imshow(_hs_img, cmap=_hs_cmap, vmin=0, vmax=1, origin="upper",
+                      extent=(0, page_w, page_h, 0),
+                      alpha=args.hillshade_alpha, interpolation="bilinear", zorder=4)
 
     # Label sizing: scaled to each island's shorter bbox dimension, clamped.
     #   lfs = clamp(shorter_dim_mm * pts_per_mm * label_scale, label_min, label_max)
@@ -684,7 +756,7 @@ def draw_map(placed, final_geoms, page_w, page_h, args, render_mode="all"):
                     altitude=args.hillshade_altitude)
                 hs = _dem.mask_to_polygon(hs, xc, yc, geom_utm)
                 extent = _dem.page_extent(xc, yc, geom_utm, geom)
-                ax.imshow(hs, cmap="gray", vmin=0, vmax=1,
+                ax.imshow(_apply_hs(hs), cmap=_hs_cmap, vmin=0, vmax=1,
                           origin="upper", extent=extent,
                           alpha=args.hillshade_alpha,
                           interpolation="bilinear", zorder=3)
@@ -728,8 +800,15 @@ def draw_map(placed, final_geoms, page_w, page_h, args, render_mode="all"):
         if render_mode != "no_text":
             name = isl["name"] or "Unnamed"
             short_name = re.sub(r" Island$", "", name)
-            short_name = re.sub(r"^(North|South|East|West) ", r"\1\n", short_name)
-            ax.text(cx, label_y, short_name,
+            _no_split = getattr(args, "_label_no_split", set())
+            if name not in _no_split:
+                short_name = re.sub(r"^(North|South|East|West) ", r"\1\n", short_name)
+            # Per-island label offset (from --label-offsets)
+            _offsets = getattr(args, "_label_offsets", {})
+            _loff = _offsets.get(name, (0.0, 0.0))
+            lcx     = cx     + _loff[0]
+            llabel_y = label_y + _loff[1]
+            ax.text(lcx, llabel_y, short_name,
                     ha="center", va="top",
                     fontsize=lfs, fontfamily=args.font,
                     color=args.label_color, zorder=3)
@@ -743,7 +822,7 @@ def draw_map(placed, final_geoms, page_w, page_h, args, render_mode="all"):
                     for ln in subregion_label.split("\n")
                 )
                 name_lines = short_name.count("\n") + 1
-                ax.text(cx, label_y + line_mm * name_lines,
+                ax.text(lcx, llabel_y + line_mm * name_lines,
                         subregion_label,
                         ha="center", va="top",
                         fontsize=sfs * 0.85, fontfamily=args.font,
@@ -780,7 +859,12 @@ def draw_map(placed, final_geoms, page_w, page_h, args, render_mode="all"):
 
     sub_size   = args.title_size * 0.22
     sub_bottom = None
-    sub_cx     = title_x - (args.title_wrap * sub_size / pts_per_mm * 0.52) / 2
+    # Center subtitle + scale bars at the visual center of the second title line
+    # (the second line is typically shorter, so its center sits to the right of line 1's center)
+    title_char_w = args.title_size / pts_per_mm * 0.52
+    title_lines  = title_wrapped.split("\n")
+    ref_line     = title_lines[1] if len(title_lines) > 1 else title_lines[0]
+    sub_cx       = title_x - len(ref_line) * title_char_w / 2 + getattr(args, "subtitle_offset_x", 0.0)
     if args.subtitle:
         sub_chars_auto = int(args.title_wrap * (args.title_size / sub_size))
         sub_chars = getattr(args, "subtitle_wrap", None) or sub_chars_auto
@@ -793,24 +877,19 @@ def draw_map(placed, final_geoms, page_w, page_h, args, render_mode="all"):
         n_sub_lines = sub_wrapped.count("\n") + 1
         sub_line_h  = sub_size / pts_per_mm * 1.4
         sub_bottom  = sub_top + n_sub_lines * sub_line_h
-        # Estimate subtitle center-x for scale bar alignment
-        longest_chars = max(len(l) for l in sub_wrapped.split("\n"))
-        char_w_mm = sub_size / pts_per_mm * 0.52
-        sub_cx = title_x - longest_chars * char_w_mm / 2
-        ax.text(title_x, sub_top,
+        ax.text(sub_cx, sub_top,
                 sub_wrapped,
-                ha="right", va="top",
+                ha="center", va="top",
                 fontsize=sub_size, fontfamily=args.font,
                 color=args.label_color, alpha=0.6, zorder=3,
                 linespacing=1.4)
 
     # ── scale bars (centered under subtitle) ──────────────────────────────────
-    from matplotlib.patches import Rectangle as MplRect
     bar_km = _nice_km(args.scale)
     km_mm  = bar_km * 1000 * (1000.0 / args.scale)
     mi_mm  = 10 * 1609.344 * (1000.0 / args.scale)
 
-    bar_h      = 0.5
+    bar_lw     = 0.75          # line width in points — same for both bars
     lbl_gap    = 1.0
     lbl_fs     = max(args.label_size, sub_size * 0.85)
     lbl_line_h = lbl_fs / pts_per_mm * 1.4
@@ -819,26 +898,47 @@ def draw_map(placed, final_geoms, page_w, page_h, args, render_mode="all"):
 
     # miles bar (first), centered at sub_cx
     bx_mi = sub_cx - mi_mm / 2
-    ax.add_patch(MplRect((bx_mi, bars_top), mi_mm, bar_h,
-                 facecolor=args.label_color, edgecolor="none", zorder=3))
-    ax.text(bx_mi, bars_top + bar_h + lbl_gap, "0",
+    ax.hlines(bars_top, bx_mi, bx_mi + mi_mm,
+              colors=args.label_color, linewidths=bar_lw, zorder=3)
+    ax.text(bx_mi, bars_top + lbl_gap, "0",
             ha="center", va="top", fontsize=lbl_fs,
             fontfamily=args.font, color=args.label_color, zorder=3)
-    ax.text(bx_mi + mi_mm, bars_top + bar_h + lbl_gap, "10 mi",
+    ax.text(bx_mi + mi_mm, bars_top + lbl_gap, "10 mi",
             ha="center", va="top", fontsize=lbl_fs,
             fontfamily=args.font, color=args.label_color, zorder=3)
 
-    # km bar (below miles), centered at sub_cx
-    km_top = bars_top + bar_h + lbl_gap + lbl_line_h + 2.0
+    # km bar (below miles), centered at sub_cx — gap reduced to 75% of natural spacing
+    km_top = bars_top + (lbl_gap + lbl_line_h + 2.0) * 0.75
     bx_km  = sub_cx - km_mm / 2
-    ax.add_patch(MplRect((bx_km, km_top), km_mm, bar_h,
-                 facecolor=args.label_color, edgecolor="none", zorder=3))
-    ax.text(bx_km, km_top + bar_h + lbl_gap, "0",
+    ax.hlines(km_top, bx_km, bx_km + km_mm,
+              colors=args.label_color, linewidths=bar_lw, zorder=3)
+    ax.text(bx_km, km_top + lbl_gap, "0",
             ha="center", va="top", fontsize=lbl_fs,
             fontfamily=args.font, color=args.label_color, zorder=3)
-    ax.text(bx_km + km_mm, km_top + bar_h + lbl_gap, f"{bar_km} km",
+    ax.text(bx_km + km_mm, km_top + lbl_gap, f"{bar_km} km",
             ha="center", va="top", fontsize=lbl_fs,
             fontfamily=args.font, color=args.label_color, zorder=3)
+
+    # CC-BY-SA badge — right-aligned to title edge, vertically centred on subtitle
+    _cc_path = getattr(args, "cc_badge", None)
+    if _cc_path and os.path.exists(_cc_path) and sub_bottom is not None:
+        from PIL import Image as _PILCC
+        _cc_raw = _PILCC.open(_cc_path).convert("RGBA")
+        _cc_arr = np.array(_cc_raw, dtype=float) / 255.0
+        # Desaturate slightly so it feels at home next to the muted poster palette
+        _lum = 0.299 * _cc_arr[..., 0] + 0.587 * _cc_arr[..., 1] + 0.114 * _cc_arr[..., 2]
+        _sat = 0.65  # 0 = greyscale, 1 = full colour
+        _cc_arr[..., :3] = _cc_arr[..., :3] * _sat + _lum[..., None] * (1 - _sat)
+        # Height: 75% of subtitle block height; right edge flush with title_x
+        _badge_h_mm = (sub_bottom - sub_top) * 0.75
+        _badge_w_mm = _badge_h_mm * (_cc_raw.width / _cc_raw.height)
+        _badge_mid  = (sub_top + sub_bottom) / 2
+        _badge_x1   = title_x
+        _badge_x0   = _badge_x1 - _badge_w_mm
+        ax.imshow(_cc_arr, origin="upper", aspect="auto",
+                  extent=(_badge_x0, _badge_x1,
+                          _badge_mid + _badge_h_mm / 2, _badge_mid - _badge_h_mm / 2),
+                  alpha=0.75, zorder=3, interpolation="lanczos")
 
     plt.tight_layout(pad=0)
     if render_mode == "text_only":
@@ -972,17 +1072,25 @@ def main():
     ap.add_argument("--font", default="DejaVu Sans")
     ap.add_argument("--title", default=None)
     _default_subtitle = (
-        "CC-BY 2026 Alan McConchie, mappingmashups.net\n"
-        "Data from the WWU Salish Sea Institute and the Mapterhorn project."
+        "Alan McConchie / mappingmashups.net\n"
+        "data: WWU Salish Sea Institute / Mapterhorn"
     )
     ap.add_argument("--subtitle", default=_default_subtitle)
     ap.add_argument("--subtitle-wrap", type=int, default=None, dest="subtitle_wrap",
                     metavar="N",
                     help="Characters per line for subtitle wrapping (default: auto from "
                          "title-wrap and font-size ratio). Lower values → narrower block.")
+    ap.add_argument("--subtitle-offset-x", type=float, default=0.0, dest="subtitle_offset_x",
+                    metavar="MM",
+                    help="Horizontal offset in mm applied to the subtitle/scale-bar center "
+                         "point (positive = right). Default: 0.")
     ap.add_argument("--subtitle-append", default="", dest="subtitle_append",
                     metavar="TEXT",
                     help="Text appended to the subtitle as a new paragraph.")
+    ap.add_argument("--cc-badge", default=None, dest="cc_badge",
+                    metavar="PATH",
+                    help="Path to a CC badge PNG (e.g. cc_by_sa.png) to display "
+                         "subtly to the right of the scale bars.")
     ap.add_argument("--output", default="islands.pdf")
     ap.add_argument("--dpi",    type=int, default=200)
     ap.add_argument("--include-unnamed", action="store_true", dest="include_unnamed")
@@ -1017,6 +1125,30 @@ def main():
                     help="Sun azimuth in degrees (default 315 = NW)")
     ap.add_argument("--hillshade-altitude", type=float, default=45.0,  dest="hillshade_altitude",
                     help="Sun altitude in degrees (default 45)")
+    ap.add_argument("--hillshade-style", default="gray", dest="hillshade_style",
+                    choices=["gray", "warm", "sepia", "atlas"],
+                    help="Hillshade colormap: gray (default), warm (Imhof warm-light/cool-shadow), "
+                         "sepia (warm throughout), atlas (deep blue shadows)")
+    ap.add_argument("--hillshade-gamma", type=float, default=1.0, dest="hillshade_gamma",
+                    metavar="G",
+                    help="Gamma applied to hillshade values before display (<1 boosts flat-island "
+                         "terrain contrast, e.g. 0.7). Default 1.0 (no adjustment).")
+    ap.add_argument("--hillshade-stretch", action="store_true", dest="hillshade_stretch",
+                    help="Stretch each island's hillshade to [0,1] before display — ensures "
+                         "even the flattest islands show full terrain contrast.")
+    ap.add_argument("--hillshade-blend", default="alpha", dest="hillshade_blend",
+                    choices=["alpha", "multiply"],
+                    help="Compositing mode for the relievo hillshade. 'alpha' (default): "
+                         "uniform opacity blend. 'multiply': only shadows darken the page; "
+                         "highlights are transparent, preserving island fill colors.")
+    ap.add_argument("--hillshade-shadow", type=float, default=0.0, dest="hillshade_shadow",
+                    metavar="LO",
+                    help="Clip hillshade values below this level to black before blending "
+                         "(0–1, default 0). Raise to prevent jet-black cast shadows.")
+    ap.add_argument("--hillshade-highlight", type=float, default=1.0, dest="hillshade_highlight",
+                    metavar="HI",
+                    help="Clip hillshade values above this level to white before blending "
+                         "(0–1, default 1). Lower to cap blown-out highlights.")
     ap.add_argument("--text-overlay", default=None, dest="text_overlay",
                     metavar="PATH.svg",
                     help="If set, render islands+hillshade to --output (no text), then render "
@@ -1047,12 +1179,20 @@ def main():
                     help="If set, partially justify row 2 to this margin (wider than "
                          "--justify-margin gives a subtler spread than the main rows).")
     ap.add_argument("--debug-grid", action="store_true", dest="debug_grid",
-                    help="Overlay a red margin rectangle and a 0.15pt blue 1-inch grid")
+                    help="Overlay a red margin rectangle and a 0.15pt blue 1 cm grid")
     ap.add_argument("--debug-bbox", action="store_true", dest="debug_bbox",
                     help="Overlay packing bounding boxes (blue=geom, red=geom+label)")
     ap.add_argument("--debug-rank", action="store_true", dest="debug_rank",
                     help="Overlay a large semi-transparent rank number at each "
                          "island centroid, sized to 50%% of the shorter bbox dim.")
+    ap.add_argument("--label-offsets", default="", dest="label_offsets",
+                    metavar="OFFSETS",
+                    help="Per-island label nudges: 'Island Name:dx,dy;Other Island:dx2,dy2' "
+                         "(mm; positive x=right, positive y=down).")
+    ap.add_argument("--label-no-split", default="", dest="label_no_split",
+                    metavar="NAMES",
+                    help="Comma-separated island names that should NOT have their leading "
+                         "directional (North/South/East/West) split onto a second line.")
     args = ap.parse_args()
 
     if args.title:
@@ -1063,6 +1203,28 @@ def main():
         args.subtitle_append = args.subtitle_append.replace("\\n", "\n")
     if args.subtitle_append:
         args.subtitle = (args.subtitle or "").rstrip() + "\n" + args.subtitle_append
+
+    # Parse --label-offsets into a dict keyed by island name
+    _label_offsets = {}
+    if args.label_offsets:
+        for entry in args.label_offsets.split(";"):
+            entry = entry.strip()
+            if not entry:
+                continue
+            if ":" not in entry:
+                continue
+            name_part, offset_part = entry.rsplit(":", 1)
+            try:
+                dx, dy = (float(v.strip()) for v in offset_part.split(","))
+                _label_offsets[name_part.strip()] = (dx, dy)
+            except ValueError:
+                print(f"  Warning: could not parse label offset {entry!r}, skipping")
+    args._label_offsets = _label_offsets
+
+    # Parse --label-no-split into a set of island names
+    args._label_no_split = {
+        n.strip() for n in args.label_no_split.split(",") if n.strip()
+    }
 
     # ── load data ─────────────────────────────────────────────────────────────
     print(f"Reading {args.shapefile} …")
