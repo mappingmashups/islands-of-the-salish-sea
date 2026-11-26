@@ -231,6 +231,7 @@ __marimo__/
 # Allow the published final poster and CC badge asset to be tracked
 !poster.svg
 !cc_by_sa.png
+!og_image.png
 
 # Source geodata — large binary files, not tracked
 # Obtain shapefiles separately and place in the expected directories:
