@@ -230,6 +230,7 @@ __marimo__/
 *.svg
 # Allow the published final poster and CC badge asset to be tracked
 !poster.svg
+!poster_v1.png
 !cc_by_sa.png
 !og_image.png
 
